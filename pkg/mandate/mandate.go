@@ -23,8 +23,15 @@ type Mandate struct {
 	ID          string
 	Goal        string
 	PlanSummary string
+	Reviews     []Review
 	Status      Status
 	Approval    Approval
+}
+
+type Review struct {
+	Role    string
+	Verdict string
+	Notes   string
 }
 
 type Approval struct {
@@ -57,6 +64,12 @@ func (m Mandate) RequireApproved() error {
 		return ErrNotApproved
 	}
 	return nil
+}
+
+func (m Mandate) WithReviews(reviews []Review) Mandate {
+	m.Reviews = make([]Review, len(reviews))
+	copy(m.Reviews, reviews)
+	return m
 }
 
 func (m Mandate) Approve(actor string, at time.Time) (Mandate, error) {
