@@ -17,6 +17,7 @@ type ExecutionConfig struct {
 	Graph       TaskGraph
 	Queue       *queue.InMemory
 	Executor    executor.TaskExecutor
+	EventSink   EventSink
 	Workers     int
 	RoleLimits  map[string]int
 	MaxAttempts int
@@ -38,7 +39,12 @@ func ExecuteTaskGraph(ctx context.Context, cfg ExecutionConfig) (ExecutionResult
 	}
 	r := New(runID)
 	if err := r.Start(cfg.Mandate); err != nil {
+		_ = emitNewEvents(ctx, cfg.EventSink, r, new(int))
 		return ExecutionResult{}, err
+	}
+	lastEmitted := 0
+	if err := emitNewEvents(ctx, cfg.EventSink, r, &lastEmitted); err != nil {
+		return finishExecution(r, cfg.Queue), err
 	}
 
 	completed := make(map[string]struct{})
@@ -51,6 +57,9 @@ func ExecuteTaskGraph(ctx context.Context, cfg ExecutionConfig) (ExecutionResult
 	for {
 		if len(completed) == len(cfg.Graph.Nodes) {
 			_ = r.Close(ClosureNormal, "all tasks succeeded")
+			if emitErr := emitNewEvents(ctx, cfg.EventSink, r, &lastEmitted); emitErr != nil {
+				return finishExecution(r, cfg.Queue), emitErr
+			}
 			return finishExecution(r, cfg.Queue), nil
 		}
 
@@ -59,7 +68,10 @@ func ExecuteTaskGraph(ctx context.Context, cfg ExecutionConfig) (ExecutionResult
 			return ExecutionResult{}, err
 		}
 		for _, task := range dispatched {
-			r.Events.RecordTask(r.ID, task.ID, "", queue.TaskQueued, "task queued")
+			r.Events.RecordTaskWithRole(r.ID, task.ID, task.Role, "", queue.TaskQueued, "task queued")
+		}
+		if err := emitNewEvents(ctx, cfg.EventSink, r, &lastEmitted); err != nil {
+			return finishExecution(r, cfg.Queue), err
 		}
 
 		summary, err := (executor.Pool{
@@ -70,6 +82,9 @@ func ExecuteTaskGraph(ctx context.Context, cfg ExecutionConfig) (ExecutionResult
 		}).RunUntilIdle(ctx)
 		if err != nil {
 			_ = r.Close(ClosureAbnormal, err.Error())
+			if emitErr := emitNewEvents(ctx, cfg.EventSink, r, &lastEmitted); emitErr != nil {
+				return finishExecution(r, cfg.Queue), emitErr
+			}
 			return finishExecution(r, cfg.Queue), err
 		}
 
@@ -80,19 +95,44 @@ func ExecuteTaskGraph(ctx context.Context, cfg ExecutionConfig) (ExecutionResult
 				if _, ok := completed[task.ID]; !ok {
 					completed[task.ID] = struct{}{}
 					progressed = true
-					r.Events.RecordTask(r.ID, task.ID, queue.TaskRunning, queue.TaskSucceeded, "task succeeded")
+					r.Events.RecordTaskWithRole(r.ID, task.ID, task.Role, queue.TaskRunning, queue.TaskSucceeded, "task succeeded")
 				}
 			case queue.TaskFailed:
 				_ = r.Close(ClosureAbnormal, "task failed: "+task.ID)
+				if emitErr := emitNewEvents(ctx, cfg.EventSink, r, &lastEmitted); emitErr != nil {
+					return finishExecution(r, cfg.Queue), emitErr
+				}
 				return finishExecution(r, cfg.Queue), nil
 			}
+		}
+		if err := emitNewEvents(ctx, cfg.EventSink, r, &lastEmitted); err != nil {
+			return finishExecution(r, cfg.Queue), err
 		}
 
 		if len(dispatched) == 0 && !progressed && summary.Retried == 0 {
 			_ = r.Close(ClosureAbnormal, "no dispatchable tasks remain")
+			if emitErr := emitNewEvents(ctx, cfg.EventSink, r, &lastEmitted); emitErr != nil {
+				return finishExecution(r, cfg.Queue), emitErr
+			}
 			return finishExecution(r, cfg.Queue), nil
 		}
 	}
+}
+
+func emitNewEvents(ctx context.Context, sink EventSink, r *Run, lastEmitted *int) error {
+	if sink == nil {
+		return nil
+	}
+	for _, event := range r.Events.Events() {
+		if event.Seq <= *lastEmitted {
+			continue
+		}
+		if err := sink.OnEvent(ctx, event); err != nil {
+			return err
+		}
+		*lastEmitted = event.Seq
+	}
+	return nil
 }
 
 func finishExecution(r *Run, q *queue.InMemory) ExecutionResult {
