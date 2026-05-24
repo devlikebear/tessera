@@ -20,8 +20,8 @@ not-json
 func TestProjectEventsTracksClosureTasksAndRoles(t *testing.T) {
 	events := []run.Event{
 		{Seq: 1, Type: run.EventRunTransition, RunID: "run-1", To: string(run.StatusRunning)},
-		{Seq: 2, Type: run.EventTaskTransition, RunID: "run-1", TaskID: "draft-chapter", Role: "writer", To: "queued"},
-		{Seq: 3, Type: run.EventTaskTransition, RunID: "run-1", TaskID: "draft-chapter", Role: "writer", To: "succeeded"},
+		{Seq: 2, Type: run.EventTaskQueued, RunID: "run-1", TaskID: "draft-chapter", Role: "writer", To: "queued"},
+		{Seq: 3, Type: run.EventTaskSucceeded, RunID: "run-1", TaskID: "draft-chapter", Role: "writer", To: "succeeded"},
 		{Seq: 4, Type: run.EventClosure, RunID: "run-1", To: string(run.ClosureNormal)},
 	}
 
@@ -48,7 +48,7 @@ func TestProjectEventsTracksClosureTasksAndRoles(t *testing.T) {
 
 func TestWriteHTMLReportIncludesSummaryAndTaskTable(t *testing.T) {
 	projection := Project([]run.Event{
-		{Seq: 1, Type: run.EventTaskTransition, RunID: "run-1", TaskID: "draft-chapter", Role: "writer", To: "succeeded"},
+		{Seq: 1, Type: run.EventTaskSucceeded, RunID: "run-1", TaskID: "draft-chapter", Role: "writer", To: "succeeded"},
 		{Seq: 2, Type: run.EventClosure, RunID: "run-1", To: string(run.ClosureNormal)},
 	})
 

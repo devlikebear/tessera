@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/devlikebear/tessera/pkg/executor"
 	"github.com/devlikebear/tessera/pkg/mandate"
@@ -38,12 +39,12 @@ func ExecuteTaskGraph(ctx context.Context, cfg ExecutionConfig) (ExecutionResult
 		runID = cfg.Graph.PlanID + "-run"
 	}
 	r := New(runID)
+	publisher := eventPublisher{run: r, sink: cfg.EventSink}
 	if err := r.Start(cfg.Mandate); err != nil {
-		_ = emitNewEvents(ctx, cfg.EventSink, r, new(int))
+		_ = publisher.Emit(ctx)
 		return ExecutionResult{}, err
 	}
-	lastEmitted := 0
-	if err := emitNewEvents(ctx, cfg.EventSink, r, &lastEmitted); err != nil {
+	if err := publisher.Emit(ctx); err != nil {
 		return finishExecution(r, cfg.Queue), err
 	}
 
@@ -57,7 +58,7 @@ func ExecuteTaskGraph(ctx context.Context, cfg ExecutionConfig) (ExecutionResult
 	for {
 		if len(completed) == len(cfg.Graph.Nodes) {
 			_ = r.Close(ClosureNormal, "all tasks succeeded")
-			if emitErr := emitNewEvents(ctx, cfg.EventSink, r, &lastEmitted); emitErr != nil {
+			if emitErr := publisher.Emit(ctx); emitErr != nil {
 				return finishExecution(r, cfg.Queue), emitErr
 			}
 			return finishExecution(r, cfg.Queue), nil
@@ -68,21 +69,41 @@ func ExecuteTaskGraph(ctx context.Context, cfg ExecutionConfig) (ExecutionResult
 			return ExecutionResult{}, err
 		}
 		for _, task := range dispatched {
-			r.Events.RecordTaskWithRole(r.ID, task.ID, task.Role, "", queue.TaskQueued, "task queued")
+			r.Events.Append(NewTaskEvent(EventTaskQueued, r.ID, task, "", queue.TaskQueued, "task queued"))
 		}
-		if err := emitNewEvents(ctx, cfg.EventSink, r, &lastEmitted); err != nil {
+		if err := publisher.Emit(ctx); err != nil {
 			return finishExecution(r, cfg.Queue), err
 		}
 
 		summary, err := (executor.Pool{
-			Queue:      cfg.Queue,
-			Executor:   cfg.Executor,
+			Queue:    cfg.Queue,
+			Executor: cfg.Executor,
+			Hooks: executor.Hooks{
+				OnTaskStarted: func(ctx context.Context, lease queue.Lease) error {
+					return publisher.Record(ctx, NewLeaseEvent(EventTaskStarted, r.ID, lease, queue.TaskQueued, queue.TaskRunning, "task started"))
+				},
+				OnTaskSucceeded: func(ctx context.Context, lease queue.Lease, result executor.Result) error {
+					event := NewLeaseEvent(EventTaskSucceeded, r.ID, lease, queue.TaskRunning, queue.TaskSucceeded, "task succeeded")
+					event.OutputSummary = summarizeEventText(result.Output)
+					return publisher.Record(ctx, event)
+				},
+				OnTaskRetrying: func(ctx context.Context, lease queue.Lease, err error) error {
+					event := NewLeaseEvent(EventTaskRetrying, r.ID, lease, queue.TaskRunning, queue.TaskRetrying, "task retrying")
+					event.Error = err.Error()
+					return publisher.Record(ctx, event)
+				},
+				OnTaskFailed: func(ctx context.Context, lease queue.Lease, err error) error {
+					event := NewLeaseEvent(EventTaskFailed, r.ID, lease, queue.TaskRunning, queue.TaskFailed, "task failed")
+					event.Error = err.Error()
+					return publisher.Record(ctx, event)
+				},
+			},
 			Workers:    cfg.Workers,
 			RoleLimits: cfg.RoleLimits,
 		}).RunUntilIdle(ctx)
 		if err != nil {
 			_ = r.Close(ClosureAbnormal, err.Error())
-			if emitErr := emitNewEvents(ctx, cfg.EventSink, r, &lastEmitted); emitErr != nil {
+			if emitErr := publisher.Emit(ctx); emitErr != nil {
 				return finishExecution(r, cfg.Queue), emitErr
 			}
 			return finishExecution(r, cfg.Queue), err
@@ -95,23 +116,22 @@ func ExecuteTaskGraph(ctx context.Context, cfg ExecutionConfig) (ExecutionResult
 				if _, ok := completed[task.ID]; !ok {
 					completed[task.ID] = struct{}{}
 					progressed = true
-					r.Events.RecordTaskWithRole(r.ID, task.ID, task.Role, queue.TaskRunning, queue.TaskSucceeded, "task succeeded")
 				}
 			case queue.TaskFailed:
 				_ = r.Close(ClosureAbnormal, "task failed: "+task.ID)
-				if emitErr := emitNewEvents(ctx, cfg.EventSink, r, &lastEmitted); emitErr != nil {
+				if emitErr := publisher.Emit(ctx); emitErr != nil {
 					return finishExecution(r, cfg.Queue), emitErr
 				}
 				return finishExecution(r, cfg.Queue), nil
 			}
 		}
-		if err := emitNewEvents(ctx, cfg.EventSink, r, &lastEmitted); err != nil {
+		if err := publisher.Emit(ctx); err != nil {
 			return finishExecution(r, cfg.Queue), err
 		}
 
 		if len(dispatched) == 0 && !progressed && summary.Retried == 0 {
 			_ = r.Close(ClosureAbnormal, "no dispatchable tasks remain")
-			if emitErr := emitNewEvents(ctx, cfg.EventSink, r, &lastEmitted); emitErr != nil {
+			if emitErr := publisher.Emit(ctx); emitErr != nil {
 				return finishExecution(r, cfg.Queue), emitErr
 			}
 			return finishExecution(r, cfg.Queue), nil
@@ -119,18 +139,33 @@ func ExecuteTaskGraph(ctx context.Context, cfg ExecutionConfig) (ExecutionResult
 	}
 }
 
-func emitNewEvents(ctx context.Context, sink EventSink, r *Run, lastEmitted *int) error {
-	if sink == nil {
+type eventPublisher struct {
+	mu          sync.Mutex
+	run         *Run
+	sink        EventSink
+	lastEmitted int
+}
+
+func (p *eventPublisher) Record(ctx context.Context, event Event) error {
+	p.run.Events.Append(event)
+	return p.Emit(ctx)
+}
+
+func (p *eventPublisher) Emit(ctx context.Context) error {
+	if p.sink == nil {
 		return nil
 	}
-	for _, event := range r.Events.Events() {
-		if event.Seq <= *lastEmitted {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, event := range p.run.Events.Events() {
+		if event.Seq <= p.lastEmitted {
 			continue
 		}
-		if err := sink.OnEvent(ctx, event); err != nil {
+		if err := p.sink.OnEvent(ctx, event); err != nil {
 			return err
 		}
-		*lastEmitted = event.Seq
+		p.lastEmitted = event.Seq
 	}
 	return nil
 }

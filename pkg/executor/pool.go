@@ -18,8 +18,16 @@ type Queue interface {
 type Pool struct {
 	Queue      Queue
 	Executor   TaskExecutor
+	Hooks      Hooks
 	Workers    int
 	RoleLimits map[string]int
+}
+
+type Hooks struct {
+	OnTaskStarted   func(context.Context, queue.Lease) error
+	OnTaskSucceeded func(context.Context, queue.Lease, Result) error
+	OnTaskRetrying  func(context.Context, queue.Lease, error) error
+	OnTaskFailed    func(context.Context, queue.Lease, error) error
 }
 
 type Summary struct {
@@ -76,15 +84,47 @@ func (p Pool) RunUntilIdle(ctx context.Context) (Summary, error) {
 					return
 				}
 
+				if err := p.Hooks.taskStarted(ctx, lease); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+					return
+				}
 				release := acquireRole(limits, lease.Task.Role)
-				_, execErr := p.Executor.Execute(ctx, lease.Task)
+				result, execErr := p.Executor.Execute(ctx, lease.Task)
 				release()
 				if execErr != nil {
+					exhausted := lease.Task.Attempts >= lease.Task.MaxAttempts
 					if retryErr := p.Queue.Retry(ctx, lease.ID, execErr.Error()); retryErr != nil {
+						_ = p.Hooks.taskFailed(ctx, lease, retryErr)
 						mu.Lock()
 						summary.Failed++
 						if firstErr == nil {
 							firstErr = retryErr
+						}
+						mu.Unlock()
+						return
+					}
+					if exhausted {
+						if err := p.Hooks.taskFailed(ctx, lease, execErr); err != nil {
+							mu.Lock()
+							if firstErr == nil {
+								firstErr = err
+							}
+							mu.Unlock()
+							return
+						}
+						mu.Lock()
+						summary.Failed++
+						mu.Unlock()
+						continue
+					}
+					if err := p.Hooks.taskRetrying(ctx, lease, execErr); err != nil {
+						mu.Lock()
+						if firstErr == nil {
+							firstErr = err
 						}
 						mu.Unlock()
 						return
@@ -95,6 +135,14 @@ func (p Pool) RunUntilIdle(ctx context.Context) (Summary, error) {
 					continue
 				}
 				if err := p.Queue.Ack(ctx, lease.ID); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+					return
+				}
+				if err := p.Hooks.taskSucceeded(ctx, lease, result); err != nil {
 					mu.Lock()
 					if firstErr == nil {
 						firstErr = err
@@ -119,4 +167,32 @@ func acquireRole(limits map[string]chan struct{}, role string) func() {
 	}
 	sem <- struct{}{}
 	return func() { <-sem }
+}
+
+func (h Hooks) taskStarted(ctx context.Context, lease queue.Lease) error {
+	if h.OnTaskStarted == nil {
+		return nil
+	}
+	return h.OnTaskStarted(ctx, lease)
+}
+
+func (h Hooks) taskSucceeded(ctx context.Context, lease queue.Lease, result Result) error {
+	if h.OnTaskSucceeded == nil {
+		return nil
+	}
+	return h.OnTaskSucceeded(ctx, lease, result)
+}
+
+func (h Hooks) taskRetrying(ctx context.Context, lease queue.Lease, err error) error {
+	if h.OnTaskRetrying == nil {
+		return nil
+	}
+	return h.OnTaskRetrying(ctx, lease, err)
+}
+
+func (h Hooks) taskFailed(ctx context.Context, lease queue.Lease, err error) error {
+	if h.OnTaskFailed == nil {
+		return nil
+	}
+	return h.OnTaskFailed(ctx, lease, err)
 }

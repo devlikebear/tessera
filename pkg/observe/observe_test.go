@@ -15,8 +15,8 @@ func TestJSONLinesSinkWritesOneEventPerLine(t *testing.T) {
 	sink := NewJSONLinesSink(&buf)
 
 	events := []run.Event{
-		{Seq: 1, Type: run.EventRunTransition, RunID: "run-1", From: string(run.StatusReady), To: string(run.StatusRunning)},
-		{Seq: 2, Type: run.EventClosure, RunID: "run-1", To: string(run.ClosureNormal)},
+		{SchemaVersion: run.EventSchemaVersion, Seq: 1, Type: run.EventRunTransition, RunID: "run-1", From: string(run.StatusReady), To: string(run.StatusRunning)},
+		{SchemaVersion: run.EventSchemaVersion, Seq: 2, Type: run.EventClosure, RunID: "run-1", To: string(run.ClosureNormal)},
 	}
 	for _, event := range events {
 		if err := sink.OnEvent(context.Background(), event); err != nil {
@@ -48,7 +48,7 @@ func TestMultiSinkFanoutAndMemorySnapshot(t *testing.T) {
 	var buf bytes.Buffer
 	memory := &MemorySink{}
 	multi := MultiSink{memory, NewJSONLinesSink(&buf)}
-	event := run.Event{Seq: 1, Type: run.EventTaskTransition, RunID: "run-1", TaskID: "task-1", Role: "writer", To: "queued"}
+	event := run.Event{SchemaVersion: run.EventSchemaVersion, Seq: 1, Type: run.EventTaskQueued, RunID: "run-1", TaskID: "task-1", Role: "writer", To: "queued"}
 
 	if err := multi.OnEvent(context.Background(), event); err != nil {
 		t.Fatalf("OnEvent() error = %v", err)

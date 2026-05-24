@@ -23,8 +23,12 @@ type Projection struct {
 type TaskProjection struct {
 	ID          string
 	Role        string
+	Stage       string
 	Status      string
+	Attempt     int
+	MaxAttempts int
 	LastMessage string
+	LastError   string
 	Events      int
 	FirstSeq    int
 	LastSeq     int
@@ -35,6 +39,7 @@ type RoleProjection struct {
 	Tasks     int
 	Queued    int
 	Running   int
+	Retrying  int
 	Succeeded int
 	Failed    int
 }
@@ -85,7 +90,7 @@ func Project(events []run.Event) Projection {
 		if event.Type == run.EventClosure {
 			projection.Closure = run.ClosureKind(event.To)
 		}
-		if event.Type != run.EventTaskTransition || event.TaskID == "" {
+		if !isTaskEvent(event) {
 			continue
 		}
 
@@ -103,11 +108,23 @@ func Project(events []run.Event) Projection {
 		if event.Role != "" {
 			task.Role = event.Role
 		}
+		if event.Stage != "" {
+			task.Stage = event.Stage
+		}
 		if event.To != "" {
 			task.Status = event.To
 		}
+		if event.Attempt > 0 {
+			task.Attempt = event.Attempt
+		}
+		if event.MaxAttempts > 0 {
+			task.MaxAttempts = event.MaxAttempts
+		}
 		if event.Message != "" {
 			task.LastMessage = event.Message
+		}
+		if event.Error != "" {
+			task.LastError = event.Error
 		}
 		task.Events++
 	}
@@ -123,6 +140,23 @@ func Project(events []run.Event) Projection {
 	})
 	projection.Roles = summarizeRoles(projection.Tasks)
 	return projection
+}
+
+func isTaskEvent(event run.Event) bool {
+	if event.TaskID == "" {
+		return false
+	}
+	switch event.Type {
+	case run.EventTaskTransition,
+		run.EventTaskQueued,
+		run.EventTaskStarted,
+		run.EventTaskRetrying,
+		run.EventTaskSucceeded,
+		run.EventTaskFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 func summarizeRoles(tasks []TaskProjection) []RoleProjection {
@@ -143,6 +177,8 @@ func summarizeRoles(tasks []TaskProjection) []RoleProjection {
 			role.Queued++
 		case "running":
 			role.Running++
+		case "retrying":
+			role.Retrying++
 		case "succeeded":
 			role.Succeeded++
 		case "failed":

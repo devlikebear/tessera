@@ -64,7 +64,7 @@ func TestExecuteTaskGraphAbnormalClosureOnRetryBudget(t *testing.T) {
 	}
 }
 
-func TestExecuteTaskGraphEmitsEventsToSink(t *testing.T) {
+func TestExecuteTaskGraphEmitsDetailedStreamingEventsToSink(t *testing.T) {
 	ctx := context.Background()
 	_, m, graph := approvedGraph(t)
 	var events []Event
@@ -81,7 +81,7 @@ func TestExecuteTaskGraphEmitsEventsToSink(t *testing.T) {
 			return nil
 		}),
 		Executor: executor.TaskHandler(func(ctx context.Context, task queue.Task) (executor.Result, error) {
-			return executor.Result{Output: task.ID}, nil
+			return executor.Result{Output: "completed " + task.ID}, nil
 		}),
 	})
 	if err != nil {
@@ -91,23 +91,78 @@ func TestExecuteTaskGraphEmitsEventsToSink(t *testing.T) {
 		t.Fatalf("closure = %q, want %q", result.Report.Closure, ClosureNormal)
 	}
 
-	var sawRunning, sawWriterQueued, sawClosure bool
+	var sawRunning, sawWriterQueued, sawWriterStarted, sawWriterSucceeded, sawClosure bool
 	for _, event := range events {
-		if event.Seq == 0 || event.At.IsZero() {
+		if event.SchemaVersion != EventSchemaVersion || event.Seq == 0 || event.At.IsZero() {
 			t.Fatalf("event missing sequence or timestamp: %+v", event)
 		}
 		if event.Type == EventRunTransition && event.To == string(StatusRunning) {
 			sawRunning = true
 		}
-		if event.Type == EventTaskTransition && event.TaskID == "draft-chapter" && event.Role == "writer" && event.To == string(queue.TaskQueued) {
+		if event.Type == EventTaskQueued && event.TaskID == "draft-chapter" && event.Role == "writer" && event.Stage == "execution" && event.To == string(queue.TaskQueued) {
 			sawWriterQueued = true
+		}
+		if event.Type == EventTaskStarted && event.TaskID == "draft-chapter" && event.Attempt == 1 && event.MaxAttempts == 2 && event.WorkerID != "" && event.InputSummary != "" {
+			sawWriterStarted = true
+		}
+		if event.Type == EventTaskSucceeded && event.TaskID == "draft-chapter" && event.OutputSummary == "completed draft-chapter" {
+			sawWriterSucceeded = true
 		}
 		if event.Type == EventClosure && event.To == string(ClosureNormal) {
 			sawClosure = true
 		}
 	}
-	if !sawRunning || !sawWriterQueued || !sawClosure {
-		t.Fatalf("events = %+v, want running transition, writer queued task, and normal closure", events)
+	if !sawRunning || !sawWriterQueued || !sawWriterStarted || !sawWriterSucceeded || !sawClosure {
+		t.Fatalf("events = %+v, want running transition, detailed writer lifecycle, and normal closure", events)
+	}
+}
+
+func TestExecuteTaskGraphEmitsRetryAndFailureDetails(t *testing.T) {
+	ctx := context.Background()
+	_, m, graph := approvedGraph(t)
+	var events []Event
+	failures := 0
+
+	result, err := ExecuteTaskGraph(ctx, ExecutionConfig{
+		RunID:       "run-1",
+		Mandate:     m,
+		Graph:       graph,
+		Queue:       queue.NewInMemory(),
+		Workers:     1,
+		MaxAttempts: 2,
+		EventSink: EventSinkFunc(func(_ context.Context, event Event) error {
+			events = append(events, event)
+			return nil
+		}),
+		Executor: executor.TaskHandler(func(ctx context.Context, task queue.Task) (executor.Result, error) {
+			if task.ID == "research-world" && failures == 0 {
+				failures++
+				return executor.Result{}, errors.New("temporary research outage")
+			}
+			return executor.Result{Output: "completed " + task.ID}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteTaskGraph() error = %v", err)
+	}
+	if result.Report.Closure != ClosureNormal {
+		t.Fatalf("closure = %q, want %q", result.Report.Closure, ClosureNormal)
+	}
+
+	var sawRetrying, sawSecondAttempt bool
+	for _, event := range events {
+		if event.TaskID != "research-world" {
+			continue
+		}
+		if event.Type == EventTaskRetrying && event.Attempt == 1 && event.MaxAttempts == 2 && event.Error == "temporary research outage" {
+			sawRetrying = true
+		}
+		if event.Type == EventTaskStarted && event.Attempt == 2 {
+			sawSecondAttempt = true
+		}
+	}
+	if !sawRetrying || !sawSecondAttempt {
+		t.Fatalf("events = %+v, want retrying event and second attempt start", events)
 	}
 }
 

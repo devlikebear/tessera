@@ -163,18 +163,21 @@ tr:last-child td { border-bottom: 0; }
   <section>
     <h2>Task Graph</h2>
     <table>
-      <thead><tr><th>Task</th><th>Role</th><th>Status</th><th>Events</th><th>Last Message</th></tr></thead>
+      <thead><tr><th>Task</th><th>Role</th><th>Stage</th><th>Status</th><th>Attempt</th><th>Events</th><th>Last Error</th><th>Last Message</th></tr></thead>
       <tbody>
       {{range .Tasks}}
         <tr>
           <td>{{.ID}}</td>
           <td>{{.Role}}</td>
+          <td>{{.Stage}}</td>
           <td><span class="status {{.Status}}">{{.Status}}</span></td>
+          <td>{{.Attempt}} / {{.MaxAttempts}}</td>
           <td>{{.Events}}</td>
+          <td>{{.LastError}}</td>
           <td>{{.LastMessage}}</td>
         </tr>
       {{else}}
-        <tr><td colspan="5">No task events found.</td></tr>
+        <tr><td colspan="8">No task events found.</td></tr>
       {{end}}
       </tbody>
     </table>
@@ -183,12 +186,12 @@ tr:last-child td { border-bottom: 0; }
   <section>
     <h2>Roles</h2>
     <table>
-      <thead><tr><th>Role</th><th>Tasks</th><th>Queued</th><th>Running</th><th>Succeeded</th><th>Failed</th></tr></thead>
+      <thead><tr><th>Role</th><th>Tasks</th><th>Queued</th><th>Running</th><th>Retrying</th><th>Succeeded</th><th>Failed</th></tr></thead>
       <tbody>
       {{range .Roles}}
-        <tr><td>{{.Role}}</td><td>{{.Tasks}}</td><td>{{.Queued}}</td><td>{{.Running}}</td><td>{{.Succeeded}}</td><td>{{.Failed}}</td></tr>
+        <tr><td>{{.Role}}</td><td>{{.Tasks}}</td><td>{{.Queued}}</td><td>{{.Running}}</td><td>{{.Retrying}}</td><td>{{.Succeeded}}</td><td>{{.Failed}}</td></tr>
       {{else}}
-        <tr><td colspan="6">No role data found.</td></tr>
+        <tr><td colspan="7">No role data found.</td></tr>
       {{end}}
       </tbody>
     </table>
